@@ -1,0 +1,194 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+  InstanceType:
+    Description: Sysdig Sandbox Instance
+    Type: String
+    Default: t2.small
+    AllowedValues:
+      - t2.micro
+      - t2.nano
+      - t2.micro
+      - t2.small
+      - t2.medium
+Resources:
+  SysdigInstanceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+  EC2InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref SysdigInstanceRole
+  EC2RolePolicies:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: eksWorkshopPolicy
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'ec2:*'
+              - 's3:*'     
+              - 'sns:*'              
+              - 'eks:*'      
+              - 'ecr:*'     
+              - 'ecs:*'                                 
+              - 'ssm:*'                
+              - 'logs:*'                    
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - 'elasticloadbalancing:*'
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - iam:CreateOpenIDConnectProvider
+              - iam:DeleteOpenIDConnectProvider              
+              - iam:GetOpenIDConnectProvider
+              - iam:TagOpenIDConnectProvider
+              - iam:UnTagOpenIDConnectProvider
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy             
+              - iam:CreateRole
+              - iam:DeleteRole              
+              - iam:CreateServiceLinkedRole
+              - iam:GetRole
+              - iam:PassRole            
+              - iam:TagRole                  
+              - iam:UnTagRole                
+              - iam:GetRolePolicy
+              - iam:List*
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy              
+              - iam:CreatePolicy
+              - iam:DeletePolicy              
+              - iam:GetPolicy
+              - iam:GetPolicyVersion
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - kms:CreateAlias
+              - kms:DeleteAlias
+              - kms:CreateGrant
+              - kms:RevokeGrant              
+              - kms:DescribeKey
+              - kms:EnableKeyRotation
+              - kms:DisableKeyRotation              
+              - kms:GetKeyPolicy
+              - kms:GetKeyRotationStatus
+              - kms:ListResourceTags
+              - kms:PutKeyPolicy
+              - kms:TagResource
+              - kms:CreateKey
+              - kms:EnableKey              
+              - kms:DisableKey              
+              - kms:ListAliases
+            Resource: '*'
+            
+      Roles:
+        - !Ref SysdigInstanceRole
+  SysdigWorkshop:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      InstanceType: !Ref InstanceType
+      SecurityGroups:
+        - !Ref SysdigSecurityGroup      
+      ImageId: !Ref LatestAmiId
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: '50'
+            DeleteOnTermination: 'false'
+            Encrypted: 'true'
+      UserData: !Base64 
+        'Fn::Join':
+          - ''
+          - - |
+              #!/bin/bash -xe
+            - |
+              yum update aws-cfn-bootstrap
+            - |              
+              yum install git -y
+            - |                  
+              yum install -y yum-utils
+            - |                  
+              yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
+            - |                  
+              yum -y install terraform
+            - |
+              cd /tmp
+            - |
+              git clone https://github.com/sysdiglabs/aws-modernization-with-sysdig
+            - |              
+              cp -r ./aws-modernization-with-sysdig/static/code/* ./              
+            - |              
+              rm -rf ./aws-modernization-with-sysdig
+            - |              
+              ./ws_general_requirements.sh
+            - |              
+              sed -ie '39,46s/^/#/' create_eks.sh   
+            - |              
+              ./create_eks.sh
+            - !Sub |              
+              export cloud9id=$(aws ec2 describe-instances --filters "Name=tag:aws:cloud9:environment,Values=${SysdigCloud9Instance}" | jq -r '.Reservations[].Instances[].InstanceId')
+            - |               
+              aws ec2 associate-iam-instance-profile --instance-id $cloud9id --iam-instance-profile Arn=$(curl http://169.254.169.254/latest/meta-data/iam/info | jq '.InstanceProfileArn')
+            - |
+              # Signal the status from cfn-init
+            - '/opt/aws/bin/cfn-signal -e $? '
+            - '         --stack '
+            - !Ref 'AWS::StackName'
+            - '         --resource SysdigWorkshop '
+            - '         --region '
+            - !Ref 'AWS::Region'
+            - |+
+      Tags:
+        - Key: Name
+          Value: SysdigWorkshop
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT45M
+
+  SysdigCloud9Instance:
+    Type: 'AWS::Cloud9::EnvironmentEC2'
+    Properties:
+      Name: 'SysdigCloud9-workshop'
+      Description: 'Sysdig Immersion Day Cloud9 IDE'
+      AutomaticStopTimeMinutes: 60
+      ImageId: amazonlinux-2-x86_64
+      InstanceType: !Ref InstanceType
+      OwnerArn: !Sub 'arn:aws:iam::${AWS::AccountId}:assumed-role/TeamRole/MasterKey'
+
+  SysdigSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Enable SSH access via port 22 for EC2 Instance Connect
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: 18.206.107.24/29
+Outputs:
+
+  Cloud9URL:
+    Description: Cloud9 Environment
+    Value:
+      Fn::Join:
+      - ''
+      - - !Sub https://${AWS::Region}.console.aws.amazon.com/cloud9/ide/
+        - !Ref SysdigCloud9Instance        
